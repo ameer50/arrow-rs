@@ -516,6 +516,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::ops::Range;
 use std::sync::Arc;
 use tokio::io::AsyncWrite;
+use tracing::info;
 
 /// An alias for a dynamically dispatched object store implementation.
 pub type DynObjectStore = dyn ObjectStore;
@@ -725,7 +726,9 @@ pub trait ObjectStore: std::fmt::Display + Send + Sync + Debug + 'static {
     ///
     /// If there exists an object at the destination, it will be overwritten.
     async fn rename(&self, from: &Path, to: &Path) -> Result<()> {
+        info!("NEW: Entering rename function, before copy call...");
         self.copy(from, to).await?;
+        info!("NEW: Post-copy call, before delete call...");
         self.delete(from).await
     }
 
