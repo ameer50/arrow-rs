@@ -33,6 +33,12 @@ pub enum Error {
     #[snafu(display("Received redirect without LOCATION, this normally indicates an incorrectly configured region"))]
     BareRedirect,
 
+    #[snafu(display("Server error, SlowDown or InternalError, with status {status}: {}", body.as_deref().unwrap_or("No Body")))]
+    Server {
+        status: StatusCode,
+        body: Option<String>,
+    },
+
     #[snafu(display("Client error with status {status}: {}", body.as_deref().unwrap_or("No Body")))]
     Client {
         status: StatusCode,
@@ -54,6 +60,7 @@ impl Error {
     pub fn status(&self) -> Option<StatusCode> {
         match self {
             Self::BareRedirect => None,
+            Self::Server { status, .. } => Some(*status),
             Self::Client { status, .. } => Some(*status),
             Self::Reqwest { source, .. } => source.status(),
         }
@@ -63,6 +70,7 @@ impl Error {
     pub fn body(&self) -> Option<&str> {
         match self {
             Self::Client { body, .. } => body.as_deref(),
+            Self::Server { body, .. } => body.as_deref(),
             Self::BareRedirect => None,
             Self::Reqwest { .. } => None,
         }
@@ -200,6 +208,32 @@ impl RetryExt for reqwest::RequestBuilder {
                         info!("NEW: Final URL of response: {}", r.url());
     
                         match r.error_for_status_ref() {
+                            // Response body might contain they keywords InternalError or SlowDown despite the status
+                            // indicating a 200 OK.
+                            // More info here: https://repost.aws/knowledge-center/s3-resolve-200-internalerror
+                            Ok(r) if r.status().is_success() && (r.text()?.contains("InternalError") || r.text()?.contains("SlowDown")) => {
+                                info!("NEW: Request was misleadingly successful: response contains InternalError or SlowDown");
+                                info!("NEW: Response body: {}", r.text()?);
+
+                                if retries == max_retries
+                                    || now.elapsed() > retry_timeout
+                                {
+                                    return Err(Error::Server {
+                                        body: response_body,
+                                        status,
+                                    })
+                                }
+
+                                let sleep = backoff.next();
+                                retries += 1;
+                                info!(
+                                    "Encountered 200 OK response which contains InternalError or SlowDown, backing off for {} seconds, retry {} of {}",
+                                    sleep.as_secs_f32(),
+                                    retries,
+                                    max_retries,
+                                );
+                                tokio::time::sleep(sleep).await;
+                            }
                             Ok(_) if r.status().is_success() => {
                                 info!("NEW: Response status inside Ok(_): {}", r.status());
                                 info!("NEW: Value of is_success(): {}", r.status().is_success());

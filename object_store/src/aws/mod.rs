@@ -289,18 +289,7 @@ impl ObjectStore for AmazonS3 {
 
     async fn copy(&self, from: &Path, to: &Path) -> Result<()> {
         info!("NEW: Inside copy-call, invoking self.client.copy_request...");
-        let response = self.client.copy_request(from, to).send().await?;
-
-        let response_body = match response.text().await {
-            Ok(body) => {
-                info!("NEW: Response body of success: {:?}", body);
-                body
-            },
-            Err(e) => {
-                error!("NEW: Error reading response body during success: {}", e);
-                e.to_string()
-            }
-        };
+        self.client.copy_request(from, to).send().await?;
 
         Ok(())
     }
