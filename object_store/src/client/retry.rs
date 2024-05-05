@@ -25,7 +25,7 @@ use reqwest::{Response, StatusCode};
 use snafu::Error as SnafuError;
 use snafu::Snafu;
 use std::time::{Duration, Instant};
-use tracing::{info, error};
+use tracing::info;
 
 /// Retry request error
 #[derive(Debug, Snafu)]
@@ -199,34 +199,35 @@ impl RetryExt for reqwest::RequestBuilder {
             loop {
                 let s = req.try_clone().expect("request body must be cloneable");
 
-                info!("NEW: The request being made: {:?}", s);
+                info!("The request being made: {:?}", s);
 
                 match client.execute(s).await {
                     Ok(r) => {
-                        info!("NEW: Response status: {}", r.status());
-                        info!("NEW: Headers: {:#?}", r.headers());
-                        info!("NEW: Final URL of response: {}", r.url());
+                        info!("Response status: {}", r.status());
+                        info!("Response headers: {:#?}", r.headers());
+                        info!("Final URL of response: {}", r.url());
     
                         match r.error_for_status_ref() {
-                            // Response body might contain return an Error despite the status indicating a 200 OK.
+                            // Response body might contain an Error despite the status saying 200.
                             // More info here: https://repost.aws/knowledge-center/s3-resolve-200-internalerror
-                            Ok(r) if r.status().is_success() && r.text()?.contains("Error") => {
-                                info!("NEW: Request was misleadingly successful: response body contains Error");
-                                info!("NEW: Response body: {}", r.text()?);
+                            Ok(r) if r.status().is_success() && r.text().await.contains("Error") => {
+                                info!("Request was misleadingly successful: response body contains Error");
+                                info!("Response body: {}", r.text().await);
 
                                 if retries == max_retries
                                     || now.elapsed() > retry_timeout
                                 {
                                     return Err(Error::Server {
-                                        body: response_body,
-                                        status,
+                                        body: Some(r.text().await),
+                                        r.status(),
                                     })
                                 }
 
                                 let sleep = backoff.next();
                                 retries += 1;
                                 info!(
-                                    "Encountered 200 OK response but body contains Error, backing off for {} seconds, retry {} of {}",
+                                    "Encountered a response status of {} but body contains Error, backing off for {} seconds, retry {} of {}",
+                                    r.status(),
                                     sleep.as_secs_f32(),
                                     retries,
                                     max_retries,
@@ -234,69 +235,60 @@ impl RetryExt for reqwest::RequestBuilder {
                                 tokio::time::sleep(sleep).await;
                             }
                             Ok(_) if r.status().is_success() => {
-                                info!("NEW: Response status inside Ok(_): {}", r.status());
-                                info!("NEW: Value of is_success(): {}", r.status().is_success());
-
+                                info!("Successful response status: {}", r.status());
                                 return Ok(r);
                             }
                             Ok(r) if r.status() == StatusCode::NOT_MODIFIED => {
-                                info!("NEW: Entered the StatusCode::NOT_MODIFIED branch, no body");
                                 return Err(Error::Client {
                                     body: None,
                                     status: StatusCode::NOT_MODIFIED,
                                 })
                             }
                             Ok(r) => {
-                                info!("NEW: Response status inside Ok(r) not modified: {}", r.status());
-                                let is_bare_redirect =
-                                    r.status().is_redirection() && !r.headers().contains_key(LOCATION);
-                                info!("NEW: is_bare_redirect: {} and location: {}", is_bare_redirect, LOCATION);
+                                let is_bare_redirect = r.status().is_redirection() && !r.headers().contains_key(LOCATION);
                                 return match is_bare_redirect {
                                     true => Err(Error::BareRedirect),
+                                    // Not actually sure if this is reachable, but here for completeness
                                     false => Err(Error::Client {
                                         body: None,
                                         status: r.status(),
-                                    }),
-                                };
+                                    })
+                                }
                             }
                             Err(e) => {
-                                // Log the error message
-                                info!("NEW: Response status inside Err(e): {}", r.status());
-                                error!("Error in response: {}", e);
                                 let status = r.status();
                                 if retries == max_retries
                                     || now.elapsed() > retry_timeout
-                                    || !status.is_server_error()
-                                {
-                                    let response_body = match r.text().await {
-                                        Ok(body) => {
-                                            let filtered_body = Some(body).filter(|b| !b.is_empty());
-                                            info!("NEW: Filtered response body: {:?}", filtered_body);
-                                            filtered_body
-                                        },
-                                        Err(e) => {
-                                            error!("NEW: Error reading response body: {}", e);
-                                            None
-                                        }
-                                    };
-                                
-                                    info!("NEW: Creating Error::Client");
-                                
+                                    || !status.is_server_error() {
+    
                                     return Err(match status.is_client_error() {
-                                        true => Error::Client {
-                                            body: response_body,
-                                            status,
-                                        },
+                                        true => match r.text().await {
+                                            Ok(body) => {
+                                                Error::Client {
+                                                    body: Some(body).filter(|b| !b.is_empty()),
+                                                    status,
+                                                }
+                                            }
+                                            Err(e) => {
+                                                Error::Reqwest {
+                                                    retries,
+                                                    max_retries,
+                                                    elapsed: now.elapsed(),
+                                                    retry_timeout,
+                                                    source: e,
+                                                }
+                                            }
+                                        }
                                         false => Error::Reqwest {
                                             retries,
                                             max_retries,
                                             elapsed: now.elapsed(),
                                             retry_timeout,
                                             source: e,
-                                        },
+                                        }
                                     });
                                 }
-        
+    
                                 let sleep = backoff.next();
                                 retries += 1;
                                 info!(

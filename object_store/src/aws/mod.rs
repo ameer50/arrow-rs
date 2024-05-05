@@ -51,7 +51,6 @@ use crate::{
     Error, GetOptions, GetResult, ListResult, MultipartId, ObjectMeta, ObjectStore, Path, PutMode,
     PutOptions, PutResult, Result,
 };
-use tracing::{info, error};
 
 static TAGS_HEADER: HeaderName = HeaderName::from_static("x-amz-tagging");
 
@@ -288,9 +287,7 @@ impl ObjectStore for AmazonS3 {
     }
 
     async fn copy(&self, from: &Path, to: &Path) -> Result<()> {
-        info!("NEW: Inside copy-call, invoking self.client.copy_request...");
         self.client.copy_request(from, to).send().await?;
-
         Ok(())
     }
 
