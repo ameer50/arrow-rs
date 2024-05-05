@@ -211,6 +211,7 @@ impl RetryExt for reqwest::RequestBuilder {
 
                             Ok(_) if r.status().is_success() => {
 
+                                let status = r.status();
                                 let response_body = r.text().await;
 
                                 match response_body {
@@ -219,8 +220,8 @@ impl RetryExt for reqwest::RequestBuilder {
                                         // More info here: https://repost.aws/knowledge-center/s3-resolve-200-internalerror
                                         match response_body.contains("Error") {
                                             false => {
-                                                info!("Successful response status: {}", r.status());
-                                                return Ok(r);
+                                                info!("Successful response status: {}", status);
+                                                return Ok(reqwest::Response::from(hyper::Response::new("Success")));
                                             }
                                             true => {
                                                 info!("Request was misleadingly successful: response body contains Error");
@@ -231,7 +232,7 @@ impl RetryExt for reqwest::RequestBuilder {
                                                 {
                                                     return Err(Error::Server {
                                                         body: Some(response_body),
-                                                        status: r.status(),
+                                                        status: status,
                                                     })
                                                 }
 
@@ -239,7 +240,7 @@ impl RetryExt for reqwest::RequestBuilder {
                                                 retries += 1;
                                                 info!(
                                                     "Encountered a response status of {} but body contains Error, backing off for {} seconds, retry {} of {}",
-                                                    r.status(),
+                                                    status,
                                                     sleep.as_secs_f32(),
                                                     retries,
                                                     max_retries,
@@ -249,13 +250,13 @@ impl RetryExt for reqwest::RequestBuilder {
                                         }
                                     }
                                     Err(e) => {
-                                        Error::Reqwest {
+                                        return Err(Error::Reqwest {
                                             retries,
                                             max_retries,
                                             elapsed: now.elapsed(),
                                             retry_timeout,
                                             source: e,
-                                        }
+                                        })
                                     }
                                 }
                             }
