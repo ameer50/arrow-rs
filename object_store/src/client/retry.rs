@@ -208,35 +208,43 @@ impl RetryExt for reqwest::RequestBuilder {
                         info!("Final URL of response: {}", r.url());
     
                         match r.error_for_status_ref() {
-                            // Response body might contain an Error despite the status saying 200.
-                            // More info here: https://repost.aws/knowledge-center/s3-resolve-200-internalerror
-                            Ok(r) if r.status().is_success() && r.text().await.contains("Error") => {
-                                info!("Request was misleadingly successful: response body contains Error");
-                                info!("Response body: {}", r.text().await);
 
-                                if retries == max_retries
-                                    || now.elapsed() > retry_timeout
-                                {
-                                    return Err(Error::Server {
-                                        body: Some(r.text().await),
-                                        r.status(),
-                                    })
-                                }
-
-                                let sleep = backoff.next();
-                                retries += 1;
-                                info!(
-                                    "Encountered a response status of {} but body contains Error, backing off for {} seconds, retry {} of {}",
-                                    r.status(),
-                                    sleep.as_secs_f32(),
-                                    retries,
-                                    max_retries,
-                                );
-                                tokio::time::sleep(sleep).await;
-                            }
                             Ok(_) if r.status().is_success() => {
-                                info!("Successful response status: {}", r.status());
-                                return Ok(r);
+
+                                let response_body = r.text().await;
+
+                                // Response body might contain an Error despite the status saying 200.
+                                // More info here: https://repost.aws/knowledge-center/s3-resolve-200-internalerror
+                                match response_body.contains("Error") {
+                                    false => {
+                                        info!("Successful response status: {}", r.status());
+                                        return Ok(r);
+                                    }
+                                    true => {
+                                        info!("Request was misleadingly successful: response body contains Error");
+                                        info!("Response body: {}", response_body);
+
+                                        if retries == max_retries
+                                            || now.elapsed() > retry_timeout
+                                        {
+                                            return Err(Error::Server {
+                                                body: Some(response_body),
+                                                status: r.status(),
+                                            })
+                                        }
+
+                                        let sleep = backoff.next();
+                                        retries += 1;
+                                        info!(
+                                            "Encountered a response status of {} but body contains Error, backing off for {} seconds, retry {} of {}",
+                                            r.status(),
+                                            sleep.as_secs_f32(),
+                                            retries,
+                                            max_retries,
+                                        );
+                                        tokio::time::sleep(sleep).await;
+                                    }
+                                }
                             }
                             Ok(r) if r.status() == StatusCode::NOT_MODIFIED => {
                                 return Err(Error::Client {
