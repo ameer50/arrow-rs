@@ -33,7 +33,7 @@ pub enum Error {
     #[snafu(display("Received redirect without LOCATION, this normally indicates an incorrectly configured region"))]
     BareRedirect,
 
-    #[snafu(display("Server error, SlowDown or InternalError, with status {status}: {}", body.as_deref().unwrap_or("No Body")))]
+    #[snafu(display("Server error, body contains Error, with status {status}: {}", body.as_deref().unwrap_or("No Body")))]
     Server {
         status: StatusCode,
         body: Option<String>,
@@ -208,11 +208,10 @@ impl RetryExt for reqwest::RequestBuilder {
                         info!("NEW: Final URL of response: {}", r.url());
     
                         match r.error_for_status_ref() {
-                            // Response body might contain they keywords InternalError or SlowDown despite the status
-                            // indicating a 200 OK.
+                            // Response body might contain return an Error despite the status indicating a 200 OK.
                             // More info here: https://repost.aws/knowledge-center/s3-resolve-200-internalerror
-                            Ok(r) if r.status().is_success() && (r.text()?.contains("InternalError") || r.text()?.contains("SlowDown")) => {
-                                info!("NEW: Request was misleadingly successful: response contains InternalError or SlowDown");
+                            Ok(r) if r.status().is_success() && r.text()?.contains("Error") => {
+                                info!("NEW: Request was misleadingly successful: response body contains Error");
                                 info!("NEW: Response body: {}", r.text()?);
 
                                 if retries == max_retries
@@ -227,7 +226,7 @@ impl RetryExt for reqwest::RequestBuilder {
                                 let sleep = backoff.next();
                                 retries += 1;
                                 info!(
-                                    "Encountered 200 OK response which contains InternalError or SlowDown, backing off for {} seconds, retry {} of {}",
+                                    "Encountered 200 OK response but body contains Error, backing off for {} seconds, retry {} of {}",
                                     sleep.as_secs_f32(),
                                     retries,
                                     max_retries,
