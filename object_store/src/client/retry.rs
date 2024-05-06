@@ -21,11 +21,12 @@ use crate::client::backoff::{Backoff, BackoffConfig};
 use futures::future::BoxFuture;
 use futures::FutureExt;
 use reqwest::header::LOCATION;
-use reqwest::{Response, StatusCode};
+use reqwest::{Response, StatusCode, Method};
 use snafu::Error as SnafuError;
 use snafu::Snafu;
 use std::time::{Duration, Instant};
 use tracing::info;
+use encoding_rs::{Encoding, UTF_8};
 
 /// Retry request error
 #[derive(Debug, Snafu)]
@@ -211,52 +212,60 @@ impl RetryExt for reqwest::RequestBuilder {
 
                             Ok(_) if r.status().is_success() => {
 
+                                if req.method() != &Method::PUT {
+                                    return Ok(r);
+                                }
+
                                 let status = r.status();
-                                let response_body = r.text().await;
+                                let headers = r.headers().clone();
 
-                                match response_body {
-                                    Ok(response_body) => {
-                                        // Response body might contain an Error despite the status saying 200.
-                                        // More info here: https://repost.aws/knowledge-center/s3-resolve-200-internalerror
-                                        match response_body.contains("Error") {
-                                            false => {
-                                                info!("Successful response status: {}", status);
-                                                return Ok(reqwest::Response::from(hyper::Response::new("Success")));
-                                            }
-                                            true => {
-                                                info!("Request was misleadingly successful: response body contains Error");
-                                                info!("Response body: {}", response_body);
+                                let encoding = Encoding::for_label(b"utf-8").unwrap_or(UTF_8);
+                                let full_bytes = r.bytes().await.unwrap();
 
-                                                if retries == max_retries
-                                                    || now.elapsed() > retry_timeout
-                                                {
-                                                    return Err(Error::Server {
-                                                        body: Some(response_body),
-                                                        status: status,
-                                                    })
-                                                }
+                                let (text, _, _) = encoding.decode(&full_bytes);
+                                let response_body = text.into_owned();
 
-                                                let sleep = backoff.next();
-                                                retries += 1;
-                                                info!(
-                                                    "Encountered a response status of {} but body contains Error, backing off for {} seconds, retry {} of {}",
-                                                    status,
-                                                    sleep.as_secs_f32(),
-                                                    retries,
-                                                    max_retries,
-                                                );
-                                                tokio::time::sleep(sleep).await;
-                                            }
+
+                                // Response body might contain an Error despite the status saying 200.
+                                // More info here: https://repost.aws/knowledge-center/s3-resolve-200-internalerror
+                                match response_body.contains("Error") {
+                                    false => {
+                                        info!("Successful response status: {}", status);
+                                        let mut success_response = hyper::Response::new(hyper::Body::from(full_bytes));
+                                        *success_response.status_mut() = hyper::StatusCode::from(status);
+
+                                        let mut hyper_headers = hyper::HeaderMap::new();
+                                        for (header_name, header_value) in headers {
+                                            hyper_headers.insert(header_name.unwrap(), header_value);
                                         }
+
+                                        *success_response.headers_mut() = hyper_headers;
+
+                                        return Ok(reqwest::Response::from(success_response));
                                     }
-                                    Err(e) => {
-                                        return Err(Error::Reqwest {
+                                    true => {
+                                        info!("Request was misleadingly successful: response body contains Error");
+                                        info!("Response body: {}", response_body);
+
+                                        if retries == max_retries
+                                            || now.elapsed() > retry_timeout
+                                        {
+                                            return Err(Error::Server {
+                                                body: Some(response_body),
+                                                status: status,
+                                            })
+                                        }
+
+                                        let sleep = backoff.next();
+                                        retries += 1;
+                                        info!(
+                                            "Encountered a response status of {} but body contains Error, backing off for {} seconds, retry {} of {}",
+                                            status,
+                                            sleep.as_secs_f32(),
                                             retries,
                                             max_retries,
-                                            elapsed: now.elapsed(),
-                                            retry_timeout,
-                                            source: e,
-                                        })
+                                        );
+                                        tokio::time::sleep(sleep).await;
                                     }
                                 }
                             }
