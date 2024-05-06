@@ -225,7 +225,7 @@ impl RetryExt for reqwest::RequestBuilder {
                                 let (text, _, _) = encoding.decode(&full_bytes);
                                 let response_body = text.into_owned();
 
-
+                                info!("Printing response_body before matching: {}", response_body);
                                 // Response body might contain an Error despite the status saying 200.
                                 // More info here: https://repost.aws/knowledge-center/s3-resolve-200-internalerror
                                 match response_body.contains("Error") {
