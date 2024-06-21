@@ -199,20 +199,15 @@ impl RetryExt for reqwest::RequestBuilder {
 
             loop {
                 let s = req.try_clone().expect("request body must be cloneable");
-
-                info!("The request being made: {:?}", s);
-
                 match client.execute(s).await {
                     Ok(r) => {
-                        info!("Response status: {}", r.status());
-                        info!("Response headers: {:#?}", r.headers());
-                        info!("Final URL of response: {}", r.url());
-    
                         match r.error_for_status_ref() {
 
                             Ok(_) if r.status().is_success() => {
 
-                                if req.method() != &Method::PUT {
+                                // Response body might contain an Error despite the status saying 200 for some PUT and POST requests.
+                                // More info here: https://repost.aws/knowledge-center/s3-resolve-200-internalerror
+                                if req.method() != &Method::PUT || req.method() != &Method::POST {
                                     return Ok(r);
                                 }
 
@@ -225,12 +220,9 @@ impl RetryExt for reqwest::RequestBuilder {
                                 let (text, _, _) = encoding.decode(&full_bytes);
                                 let response_body = text.into_owned();
 
-                                info!("Printing response_body before matching: {}", response_body);
-                                // Response body might contain an Error despite the status saying 200.
-                                // More info here: https://repost.aws/knowledge-center/s3-resolve-200-internalerror
                                 match response_body.contains("Error") {
                                     false => {
-                                        info!("Successful response status: {}", status);
+                                        // Clone response
                                         let mut success_response = hyper::Response::new(hyper::Body::from(full_bytes));
                                         *success_response.status_mut() = hyper::StatusCode::from(status);
 
@@ -244,9 +236,6 @@ impl RetryExt for reqwest::RequestBuilder {
                                         return Ok(reqwest::Response::from(success_response));
                                     }
                                     true => {
-                                        info!("Request was misleadingly successful: response body contains Error");
-                                        info!("Response body: {}", response_body);
-
                                         if retries == max_retries
                                             || now.elapsed() > retry_timeout
                                         {
