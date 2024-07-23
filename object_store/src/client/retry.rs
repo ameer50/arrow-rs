@@ -201,13 +201,18 @@ impl RetryExt for reqwest::RequestBuilder {
                 let s = req.try_clone().expect("request body must be cloneable");
                 match client.execute(s).await {
                     Ok(r) => {
+                        info!("Response status: {}", r.status());
+                        info!("Response headers: {:#?}", r.headers());
+                        info!("Final URL of response: {}", r.url());
+
                         match r.error_for_status_ref() {
 
                             Ok(_) if r.status().is_success() => {
 
                                 // Response body might contain an Error despite the status saying 200 for some PUT and POST requests.
                                 // More info here: https://repost.aws/knowledge-center/s3-resolve-200-internalerror
-                                if req.method() != &Method::PUT || req.method() != &Method::POST {
+                                if req.method() != &Method::PUT && req.method() != &Method::POST {
+                                    info!("Response is not PUT or POST");
                                     return Ok(r);
                                 }
 
@@ -220,6 +225,7 @@ impl RetryExt for reqwest::RequestBuilder {
                                 let (text, _, _) = encoding.decode(&full_bytes);
                                 let response_body = text.into_owned();
 
+                                info!("Printing response_body before matching: {}", response_body);
                                 match response_body.contains("Error") {
                                     false => {
                                         // Clone response
@@ -238,6 +244,9 @@ impl RetryExt for reqwest::RequestBuilder {
                                         return Ok(reqwest::Response::from(success_response));
                                     }
                                     true => {
+                                        info!("Request was misleadingly successful: response body contains Error");
+                                        info!("Response body: {}", response_body);
+
                                         if retries == max_retries
                                             || now.elapsed() > retry_timeout
                                         {
@@ -282,7 +291,7 @@ impl RetryExt for reqwest::RequestBuilder {
                                 if retries == max_retries
                                     || now.elapsed() > retry_timeout
                                     || !status.is_server_error() {
-    
+
                                     return Err(match status.is_client_error() {
                                         true => match r.text().await {
                                             Ok(body) => {
@@ -310,7 +319,7 @@ impl RetryExt for reqwest::RequestBuilder {
                                         }
                                     });
                                 }
-    
+
                                 let sleep = backoff.next();
                                 retries += 1;
                                 info!(
@@ -352,7 +361,7 @@ impl RetryExt for reqwest::RequestBuilder {
                         let sleep = backoff.next();
                         retries += 1;
                         info!(
-                            "Encountered transport error backing off for {} seconds, retry {} of {}: {}", 
+                            "Encountered transport error backing off for {} seconds, retry {} of {}: {}",
                             sleep.as_secs_f32(),
                             retries,
                             max_retries,
