@@ -33,6 +33,12 @@ pub enum Error {
     #[snafu(display("Received redirect without LOCATION, this normally indicates an incorrectly configured region"))]
     BareRedirect,
 
+    #[snafu(display("Server error, body contains Error, with status {status}: {}", body.as_deref().unwrap_or("No Body")))]
+    Server {
+        status: StatusCode,
+        body: Option<String>,
+    },
+
     #[snafu(display("Client error with status {status}: {}", body.as_deref().unwrap_or("No Body")))]
     Client {
         status: StatusCode,
@@ -54,6 +60,7 @@ impl Error {
     pub fn status(&self) -> Option<StatusCode> {
         match self {
             Self::BareRedirect => None,
+            Self::Server { status, .. } => Some(*status),
             Self::Client { status, .. } => Some(*status),
             Self::Reqwest { source, .. } => source.status(),
         }
@@ -63,6 +70,7 @@ impl Error {
     pub fn body(&self) -> Option<&str> {
         match self {
             Self::Client { body, .. } => body.as_deref(),
+            Self::Server { body, .. } => body.as_deref(),
             Self::BareRedirect => None,
             Self::Reqwest { .. } => None,
         }
@@ -177,6 +185,8 @@ pub struct RetryableRequest {
     sensitive: bool,
     idempotent: Option<bool>,
     payload: Option<PutPayload>,
+
+    retry_error_body: bool,
 }
 
 impl RetryableRequest {
@@ -202,6 +212,13 @@ impl RetryableRequest {
     /// Provide a [`PutPayload`]
     pub fn payload(self, payload: Option<PutPayload>) -> Self {
         Self { payload, ..self }
+    }
+
+    pub fn retry_error_body(self, retry_error_body: bool) -> Self {
+        Self {
+            retry_error_body,
+            ..self
+        }
     }
 
     pub async fn send(self) -> Result<Response> {
@@ -232,7 +249,54 @@ impl RetryableRequest {
 
             match self.client.execute(request).await {
                 Ok(r) => match r.error_for_status_ref() {
-                    Ok(_) if r.status().is_success() => return Ok(r),
+                    Ok(_) if r.status().is_success() => {
+                        // Response body might contain an Error despite the status saying 200 for some PUT and POST requests.
+                        // More info here: https://repost.aws/knowledge-center/s3-resolve-200-internalerror
+                        if !self.retry_error_body {
+                            return Ok(r);
+                        }
+
+                        let status = r.status();
+                        let headers = r.headers().clone();
+
+                        let bytes = r.bytes().await.map_err(|e| Error::Reqwest {
+                            retries,
+                            max_retries,
+                            elapsed: now.elapsed(),
+                            retry_timeout,
+                            source: e,
+                        })?;
+
+                        let response_body = String::from_utf8_lossy(&bytes);
+                        info!("Checking for error in response_body: {}", response_body);
+
+                        if !response_body.contains("Error") {
+                            // Clone response
+                            let mut success_response = hyper::Response::new(bytes);
+                            *success_response.status_mut() = status;
+                            *success_response.headers_mut() = headers;
+
+                            return Ok(reqwest::Response::from(success_response));
+                        } else {
+                            if retries == max_retries || now.elapsed() > retry_timeout {
+                                return Err(Error::Server {
+                                    body: Some(response_body.into_owned()),
+                                    status,
+                                });
+                            }
+
+                            let sleep = backoff.next();
+                            retries += 1;
+                            info!(
+                                "Encountered a response status of {} but body contains Error, backing off for {} seconds, retry {} of {}",
+                                status,
+                                sleep.as_secs_f32(),
+                                retries,
+                                max_retries,
+                            );
+                            tokio::time::sleep(sleep).await;
+                        }
+                    }
                     Ok(r) if r.status() == StatusCode::NOT_MODIFIED => {
                         return Err(Error::Client {
                             body: None,
@@ -383,6 +447,7 @@ impl RetryExt for reqwest::RequestBuilder {
             idempotent: None,
             payload: None,
             sensitive: false,
+            retry_error_body: false,
         }
     }
 
